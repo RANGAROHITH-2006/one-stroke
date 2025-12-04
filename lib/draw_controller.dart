@@ -14,9 +14,12 @@ class DrawController extends ChangeNotifier {
   
   // Drawing data
   List<Offset> userPath = [];
-  Set<String> drawnSegments = {};
   Path? svgPath;
   double tolerance = 16.0; // Hit detection tolerance in pixels
+  
+  // Continuous range-based tracking (instead of discrete dots)
+  // Each segment has a list of drawn ranges [start, end] along its length
+  List<List<List<double>>> drawnRanges = []; // [segmentIndex][rangeIndex][start, end]
   
   // Path metrics
   List<ui.PathMetric> pathSegments = [];
@@ -33,6 +36,10 @@ class DrawController extends ChangeNotifier {
     svgPath = transformedPath;
     pathSegments = SvgPathParser.getPathSegments(transformedPath);
     totalPathLength = SvgPathParser.getPathLength(transformedPath);
+    
+    // Initialize empty ranges for each segment
+    drawnRanges = List.generate(pathSegments.length, (_) => []);
+    
     reset();
   }
   
@@ -47,7 +54,8 @@ class DrawController extends ChangeNotifier {
       isDrawing = true;
       userPath.clear();
       userPath.add(localPosition);
-      drawnSegments.clear();
+      // Reset ranges for all segments
+      drawnRanges = List.generate(pathSegments.length, (_) => []);
       progress = 0.0;
       errorMessage = null;
       
@@ -78,7 +86,7 @@ class DrawController extends ChangeNotifier {
       
       // Check for completion - use 95% threshold to account for path detection tolerance
       // This prevents the issue where visually complete paths show as incomplete
-      if (progress >= 0.96) {
+      if (progress >= 0.99) {
         _completeLevel();
       }
       
@@ -109,7 +117,7 @@ class DrawController extends ChangeNotifier {
     progress = 0.0;
     errorMessage = null;
     userPath.clear();
-    drawnSegments.clear();
+    drawnRanges = List.generate(pathSegments.length, (_) => []);
     onGameReset?.call();
     notifyListeners();
   }
@@ -135,8 +143,13 @@ class DrawController extends ChangeNotifier {
     return false;
   }
   
-  /// Mark a point on the path as drawn
+  /// Mark a point on the path as drawn - only marks the closest segment
   void _markSegmentAsDrawn(Offset point) {
+    // Find the single closest point across ALL segments
+    int? bestSegmentIndex;
+    double? bestDistance;
+    double bestMinDist = double.infinity;
+    
     for (int segmentIndex = 0; segmentIndex < pathSegments.length; segmentIndex++) {
       final pathMetric = pathSegments[segmentIndex];
       final length = pathMetric.length;
@@ -144,66 +157,141 @@ class DrawController extends ChangeNotifier {
       for (double distance = 0; distance <= length; distance += 1) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
-          final double currentDistance = (point - tangent.position).distance;
-          if (currentDistance <= tolerance) {
-            // Create a unique identifier for this segment
-            // Use 100 discrete positions for better accuracy
-            int discretePosition = (distance / length * 100).round();
-            String segmentId = '${segmentIndex}_$discretePosition';
-            drawnSegments.add(segmentId);
+          final double currentDist = (point - tangent.position).distance;
+          if (currentDist <= tolerance && currentDist < bestMinDist) {
+            bestMinDist = currentDist;
+            bestSegmentIndex = segmentIndex;
+            bestDistance = distance;
           }
         }
       }
     }
-  }
-  
-  /// Fill path segments between two points
-  void _fillPathBetween(Offset startPoint, Offset endPoint) {
-    // Find the closest path segments for both points
-    _markSegmentAsDrawn(startPoint);
-    _markSegmentAsDrawn(endPoint);
     
-    // Interpolate points between start and end for smoother path filling
-    const int steps = 20; // Increased from 10 for better coverage
-    for (int i = 1; i < steps; i++) {
-      double t = i / steps;
-      Offset interpolatedPoint = Offset(
-        startPoint.dx + (endPoint.dx - startPoint.dx) * t,
-        startPoint.dy + (endPoint.dy - startPoint.dy) * t,
-      );
-      
-      if (_isPointOnPath(interpolatedPoint)) {
-        _markSegmentAsDrawn(interpolatedPoint);
-      }
+    // Only mark the single closest segment
+    if (bestSegmentIndex != null && bestDistance != null) {
+      final length = pathSegments[bestSegmentIndex].length;
+      // Add a small range around this point
+      double rangeStart = (bestDistance - tolerance / 2).clamp(0, length);
+      double rangeEnd = (bestDistance + tolerance / 2).clamp(0, length);
+      _addRange(bestSegmentIndex, rangeStart, rangeEnd);
     }
   }
   
-  /// Update progress based on drawn segments
+  /// Add a range to a segment, merging with existing overlapping ranges
+  void _addRange(int segmentIndex, double start, double end) {
+    if (segmentIndex >= drawnRanges.length) return;
+    
+    List<List<double>> ranges = drawnRanges[segmentIndex];
+    
+    // Find overlapping or adjacent ranges and merge
+    List<List<double>> newRanges = [];
+    
+    for (var range in ranges) {
+      // Check if ranges overlap or are adjacent (within 2 pixels)
+      if (start <= range[1] + 2 && end >= range[0] - 2) {
+        // Merge ranges
+        start = start < range[0] ? start : range[0];
+        end = end > range[1] ? end : range[1];
+      } else {
+        newRanges.add(range);
+      }
+    }
+    
+    newRanges.add([start, end]);
+    
+    // Sort ranges by start position
+    newRanges.sort((a, b) => a[0].compareTo(b[0]));
+    
+    // Merge any remaining overlapping ranges after sorting
+    List<List<double>> finalRanges = [];
+    for (var range in newRanges) {
+      if (finalRanges.isEmpty || finalRanges.last[1] < range[0] - 2) {
+        finalRanges.add(range);
+      } else {
+        finalRanges.last[1] = finalRanges.last[1] > range[1] ? finalRanges.last[1] : range[1];
+      }
+    }
+    
+    drawnRanges[segmentIndex] = finalRanges;
+  }
+  
+  /// Fill path segments between two points - only fills if points are consecutive on the path
+  void _fillPathBetween(Offset startPoint, Offset endPoint) {
+    // Calculate the screen distance between the two touch points
+    double screenDistance = (endPoint - startPoint).distance;
+    
+    // Only fill between points if they are close on screen (prevents jumping across path)
+    // This prevents the bug where touching near two different parts of the path
+    // would fill the entire range between them
+    if (screenDistance > tolerance * 3) {
+      // Points are too far apart on screen, just mark them individually
+      _markSegmentAsDrawn(startPoint);
+      _markSegmentAsDrawn(endPoint);
+      return;
+    }
+    
+    // For each segment, find if we can trace a continuous line between the two points
+    for (int segmentIndex = 0; segmentIndex < pathSegments.length; segmentIndex++) {
+      final pathMetric = pathSegments[segmentIndex];
+      final length = pathMetric.length;
+      
+      // Find closest distances on path for both points
+      double? startDist = _findClosestDistanceOnSegment(startPoint, segmentIndex);
+      double? endDist = _findClosestDistanceOnSegment(endPoint, segmentIndex);
+      
+      if (startDist != null && endDist != null) {
+        // Calculate the path distance between the two points
+        double pathDistance = (startDist - endDist).abs();
+        
+        // Only fill if the path distance is reasonable (not jumping across the shape)
+        // The path distance should be similar to the screen distance
+        // Allow some margin for curved paths
+        if (pathDistance <= screenDistance * 2 + tolerance * 2) {
+          double rangeStart = (startDist < endDist ? startDist : endDist);
+          double rangeEnd = (startDist > endDist ? startDist : endDist);
+          _addRange(segmentIndex, rangeStart.clamp(0, length), rangeEnd.clamp(0, length));
+        }
+      }
+    }
+    
+    // Always mark the individual points
+    _markSegmentAsDrawn(startPoint);
+    _markSegmentAsDrawn(endPoint);
+  }
+  
+  /// Find the closest distance along a segment for a given point
+  double? _findClosestDistanceOnSegment(Offset point, int segmentIndex) {
+    final pathMetric = pathSegments[segmentIndex];
+    final length = pathMetric.length;
+    
+    double? closestDistance;
+    double minDist = double.infinity;
+    
+    for (double distance = 0; distance <= length; distance += 1) {
+      final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
+      if (tangent != null) {
+        final double currentDist = (point - tangent.position).distance;
+        if (currentDist <= tolerance && currentDist < minDist) {
+          minDist = currentDist;
+          closestDistance = distance;
+        }
+      }
+    }
+    
+    return closestDistance;
+  }
+  
+  /// Update progress based on drawn ranges (continuous line tracking)
   void _updateProgress() {
     if (totalPathLength == 0) return;
     
-    // Calculate drawn length based on unique segments
     double drawnLength = 0;
-    Set<String> uniqueSegments = drawnSegments;
-    
-    // Each unique segment represents a portion of the total path
-    // Using 101 positions (0-100 inclusive)
-    const int numPositions = 101;
     
     for (int segmentIndex = 0; segmentIndex < pathSegments.length; segmentIndex++) {
-      double segmentLength = pathSegments[segmentIndex].length;
-      
-      // Count how many discrete positions are drawn for this segment
-      int drawnPositions = 0;
-      for (int position = 0; position <= 100; position++) {
-        if (uniqueSegments.contains('${segmentIndex}_$position')) {
-          drawnPositions++;
-        }
+      // Sum up all drawn ranges for this segment
+      for (var range in drawnRanges[segmentIndex]) {
+        drawnLength += range[1] - range[0];
       }
-      
-      // Calculate percentage of this segment that's drawn
-      double segmentProgress = drawnPositions / numPositions;
-      drawnLength += segmentLength * segmentProgress;
     }
     
     progress = (drawnLength / totalPathLength).clamp(0.0, 1.0);
@@ -238,4 +326,7 @@ class DrawController extends ChangeNotifier {
   
   /// Check if game has error
   bool get hasError => errorMessage != null;
+  
+  /// Get drawn ranges for painter (for visual rendering)
+  List<List<List<double>>> get getDrawnRanges => drawnRanges;
 }

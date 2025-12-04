@@ -360,7 +360,7 @@ class _LevelScreenState extends State<LevelScreen> {
                     painter: GamePainter(
                       svgPath: transformedSvgPath,
                       userPath: drawController.userPath,
-                      drawnSegments: drawController.drawnSegments,
+                      drawnRanges: drawController.getDrawnRanges,
                       pathSegments: drawController.pathSegments,
                       progress: drawController.progress,
                       isGameCompleted: drawController.isGameCompleted,
@@ -372,41 +372,41 @@ class _LevelScreenState extends State<LevelScreen> {
             ),
           ),
           
-          // Instructions overlay (shows when not drawing)
-          AnimatedBuilder(
-            animation: drawController,
-            builder: (context, child) {
-              if (!drawController.isDrawing && 
-                  drawController.userPath.isEmpty && 
-                  !drawController.isGameCompleted) {
-                return Positioned(
-                  bottom: 20,
-                  left: 20,
-                  right: 20,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 16,
-                      vertical: 12,
-                    ),
-                    decoration: BoxDecoration(
-                      color: Colors.black.withOpacity(0.7),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Text(
-                      'Trace the outline in one continuous stroke',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                );
-              }
-              return const SizedBox.shrink();
-            },
-          ),
+          // // Instructions overlay (shows when not drawing)
+          // AnimatedBuilder(
+          //   animation: drawController,
+          //   builder: (context, child) {
+          //     if (!drawController.isDrawing && 
+          //         drawController.userPath.isEmpty && 
+          //         !drawController.isGameCompleted) {
+          //       return Positioned(
+          //         bottom: 0,
+          //         left: 20,
+          //         right: 20,
+          //         child: Container(
+          //           padding: const EdgeInsets.symmetric(
+          //             horizontal: 16,
+          //             vertical: 12,
+          //           ),
+          //           decoration: BoxDecoration(
+          //             color: Colors.black.withOpacity(0.7),
+          //             borderRadius: BorderRadius.circular(12),
+          //           ),
+          //           child: const Text(
+          //             'Trace the outline in one continuous stroke',
+          //             textAlign: TextAlign.center,
+          //             style: TextStyle(
+          //               color: Colors.white,
+          //               fontSize: 14,
+          //               fontWeight: FontWeight.w500,
+          //             ),
+          //           ),
+          //         ),
+          //       );
+          //     }
+          //     return const SizedBox.shrink();
+          //   },
+          // ),
         ],
       ),
     );

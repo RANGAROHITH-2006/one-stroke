@@ -7,7 +7,7 @@ import 'dart:ui' as ui;
 class GamePainter extends CustomPainter {
   final Path? svgPath;
   final List<Offset> userPath;
-  final Set<String> drawnSegments;
+  final List<List<List<double>>> drawnRanges; // Continuous ranges instead of discrete segments
   final List<ui.PathMetric> pathSegments;
   final double progress;
   final bool isGameCompleted;
@@ -16,7 +16,7 @@ class GamePainter extends CustomPainter {
   GamePainter({
     required this.svgPath,
     required this.userPath,
-    required this.drawnSegments,
+    required this.drawnRanges,
     required this.pathSegments,
     required this.progress,
     required this.isGameCompleted,
@@ -48,29 +48,38 @@ class GamePainter extends CustomPainter {
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
     
-    // Draw only the untraced segments
+    // Draw the untraced parts of each segment using continuous ranges
     for (int segmentIndex = 0; segmentIndex < pathSegments.length; segmentIndex++) {
       final pathMetric = pathSegments[segmentIndex];
       final totalLength = pathMetric.length;
       
-      // Check which parts of this segment have NOT been drawn
-      // Using 100 discrete positions to match the controller
-      const int numSegments = 100;
-      for (int i = 0; i <= numSegments; i++) {
-        String segmentId = '${segmentIndex}_$i';
-        
-        if (!drawnSegments.contains(segmentId)) {
-          // Draw this untraced segment
-          final startDistance = (i / numSegments) * totalLength;
-          final endDistance = ((i + 1) / numSegments) * totalLength;
-          
+      // Get drawn ranges for this segment
+      List<List<double>> ranges = segmentIndex < drawnRanges.length 
+          ? drawnRanges[segmentIndex] 
+          : [];
+      
+      // Find undrawn ranges by inverting drawn ranges
+      double currentPos = 0;
+      for (var range in ranges) {
+        // Draw untraced part before this range
+        if (currentPos < range[0]) {
           try {
-            final segmentPath = pathMetric.extractPath(startDistance, endDistance.clamp(0, totalLength));
+            final segmentPath = pathMetric.extractPath(currentPos, range[0]);
             canvas.drawPath(segmentPath, paint);
           } catch (e) {
-            // Handle any path extraction errors gracefully
-            continue;
+            // Handle path extraction errors
           }
+        }
+        currentPos = range[1];
+      }
+      
+      // Draw remaining untraced part after last range
+      if (currentPos < totalLength) {
+        try {
+          final segmentPath = pathMetric.extractPath(currentPos, totalLength);
+          canvas.drawPath(segmentPath, paint);
+        } catch (e) {
+          // Handle path extraction errors
         }
       }
     }
@@ -87,7 +96,7 @@ class GamePainter extends CustomPainter {
     } else if (hasError) {
       traceColor = const Color(0xFFFF3B30); // Red for error
     } else {
-      traceColor = const Color(0xFF007AFF); // Blue for normal drawing
+      traceColor = const Color(0xFFFF6347); // Tomato red for normal drawing
     }
     
     final paint = Paint()
@@ -97,29 +106,22 @@ class GamePainter extends CustomPainter {
       ..strokeCap = StrokeCap.round
       ..strokeJoin = StrokeJoin.round;
     
-    // Draw each traced segment
+    // Draw each traced segment using continuous ranges
     for (int segmentIndex = 0; segmentIndex < pathSegments.length; segmentIndex++) {
       final pathMetric = pathSegments[segmentIndex];
-      final totalLength = pathMetric.length;
       
-      // Check which parts of this segment have been drawn
-      // Using 100 discrete positions to match the controller
-      const int numSegments = 100;
-      for (int i = 0; i <= numSegments; i++) {
-        String segmentId = '${segmentIndex}_$i';
-        
-        if (drawnSegments.contains(segmentId)) {
-          // Draw this segment
-          final startDistance = (i / numSegments) * totalLength;
-          final endDistance = ((i + 1) / numSegments) * totalLength;
-          
-          try {
-            final segmentPath = pathMetric.extractPath(startDistance, endDistance.clamp(0, totalLength));
-            canvas.drawPath(segmentPath, paint);
-          } catch (e) {
-            // Handle any path extraction errors gracefully
-            continue;
-          }
+      // Get drawn ranges for this segment
+      List<List<double>> ranges = segmentIndex < drawnRanges.length 
+          ? drawnRanges[segmentIndex] 
+          : [];
+      
+      // Draw each range as a continuous line
+      for (var range in ranges) {
+        try {
+          final segmentPath = pathMetric.extractPath(range[0], range[1]);
+          canvas.drawPath(segmentPath, paint);
+        } catch (e) {
+          // Handle path extraction errors
         }
       }
     }
@@ -161,7 +163,7 @@ class GamePainter extends CustomPainter {
     if (oldDelegate is! GamePainter) return true;
     
     return oldDelegate.userPath.length != userPath.length ||
-           oldDelegate.drawnSegments.length != drawnSegments.length ||
+           oldDelegate.drawnRanges.length != drawnRanges.length ||
            oldDelegate.progress != progress ||
            oldDelegate.isGameCompleted != isGameCompleted ||
            oldDelegate.hasError != hasError;
