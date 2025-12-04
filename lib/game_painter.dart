@@ -54,7 +54,7 @@ class GamePainter extends CustomPainter {
       final totalLength = pathMetric.length;
       
       // Check which parts of this segment have NOT been drawn
-      const int numSegments = 100;
+      const int numSegments = 200;
       for (int i = 0; i < numSegments; i++) {
         String segmentId = '${segmentIndex}_$i';
         
@@ -102,7 +102,7 @@ class GamePainter extends CustomPainter {
       final totalLength = pathMetric.length;
       
       // Check which parts of this segment have been drawn
-      const int numSegments = 100;
+      const int numSegments = 200;
       for (int i = 0; i < numSegments; i++) {
         String segmentId = '${segmentIndex}_$i';
         

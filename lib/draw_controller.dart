@@ -16,7 +16,7 @@ class DrawController extends ChangeNotifier {
   List<Offset> userPath = [];
   Set<String> drawnSegments = {};
   Path? svgPath;
-  double tolerance = 12.0; // Hit detection tolerance in pixels
+  double tolerance = 16.0; // Hit detection tolerance in pixels
   
   // Path metrics
   List<ui.PathMetric> pathSegments = [];
@@ -77,7 +77,7 @@ class DrawController extends ChangeNotifier {
       _updateProgress();
       
       // Check for completion
-      if (progress >= 0.98) { // 98% completion threshold
+      if (progress >= 1) { // 100% completion threshold
         _completeLevel();
       }
       
@@ -140,13 +140,13 @@ class DrawController extends ChangeNotifier {
       final pathMetric = pathSegments[segmentIndex];
       final length = pathMetric.length;
       
-      for (double distance = 0; distance < length; distance += 2) {
+      for (double distance = 0; distance < length; distance += 1) {
         final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
         if (tangent != null) {
           final double currentDistance = (point - tangent.position).distance;
           if (currentDistance <= tolerance) {
             // Create a unique identifier for this segment
-            int discretePosition = (distance / length * 100).round();
+            int discretePosition = (distance / length * 200).round();
             String segmentId = '${segmentIndex}_$discretePosition';
             drawnSegments.add(segmentId);
           }
@@ -162,7 +162,7 @@ class DrawController extends ChangeNotifier {
     _markSegmentAsDrawn(endPoint);
     
     // Interpolate points between start and end for smoother path filling
-    const int steps = 10;
+    const int steps = 20; // Increased from 10 for better coverage
     for (int i = 1; i < steps; i++) {
       double t = i / steps;
       Offset interpolatedPoint = Offset(
@@ -190,14 +190,14 @@ class DrawController extends ChangeNotifier {
       
       // Count how many discrete positions are drawn for this segment
       int drawnPositions = 0;
-      for (int position = 0; position <= 100; position++) {
+      for (int position = 0; position <= 200; position++) {
         if (uniqueSegments.contains('${segmentIndex}_$position')) {
           drawnPositions++;
         }
       }
       
       // Calculate percentage of this segment that's drawn
-      double segmentProgress = drawnPositions / 100.0;
+      double segmentProgress = drawnPositions / 200.0;
       drawnLength += segmentLength * segmentProgress;
     }
     
