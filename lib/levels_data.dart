@@ -46,7 +46,7 @@ class LevelsData {
     ),
     LevelData(
       levelNumber: 6,
-      svgPath: 'assets/svg/home.svg', // Using home.svg as fallback for level 6
+      svgPath: 'assets/svg/Level6.svg', // Using home.svg as fallback for level 6
       isCompleted: false,
       isUnlocked: true,
     ),
