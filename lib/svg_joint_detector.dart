@@ -14,7 +14,7 @@ class SvgJointDetector {
   static List<Offset> detectJoints(
     String pathData, {
     bool includeControlPoints = true,
-    double duplicateTolerance = 0.1,
+    double duplicateTolerance = 2.0,
   }) {
     final List<Offset> joints = [];
     double currentX = 0.0;
@@ -382,7 +382,47 @@ class SvgJointDetector {
       }
     }
 
-    return _removeDuplicateJoints(joints, duplicateTolerance);
+    final cleaned = _removeDuplicateJoints(joints, duplicateTolerance);
+    return _removeCollinearPoints(cleaned, angleThreshold: 5.0);
+  }
+
+  /// Removes collinear points (points that don't change direction significantly)
+  static List<Offset> _removeCollinearPoints(
+    List<Offset> joints,
+    {double angleThreshold = 5.0,
+  }) {
+    if (joints.length < 3) return joints;
+
+    final result = <Offset>[joints.first];
+    final threshold = angleThreshold * math.pi / 180; // Convert to radians
+
+    for (int i = 1; i < joints.length - 1; i++) {
+      final prev = joints[i - 1];
+      final current = joints[i];
+      final next = joints[i + 1];
+
+      // Calculate vectors
+      final v1 = Offset(current.dx - prev.dx, current.dy - prev.dy);
+      final v2 = Offset(next.dx - current.dx, next.dy - current.dy);
+
+      // Calculate angle between vectors
+      final dot = v1.dx * v2.dx + v1.dy * v2.dy;
+      final mag1 = math.sqrt(v1.dx * v1.dx + v1.dy * v1.dy);
+      final mag2 = math.sqrt(v2.dx * v2.dx + v2.dy * v2.dy);
+
+      if (mag1 > 0.01 && mag2 > 0.01) {
+        final cosAngle = (dot / (mag1 * mag2)).clamp(-1.0, 1.0);
+        final angle = math.acos(cosAngle);
+
+        // Only keep points where direction changes significantly
+        if (angle > threshold) {
+          result.add(current);
+        }
+      }
+    }
+
+    result.add(joints.last);
+    return result;
   }
 
   /// Parses a string of numbers into a list of doubles
@@ -412,13 +452,22 @@ class SvgJointDetector {
 
     for (int i = 1; i < joints.length; i++) {
       final current = joints[i];
-      final last = result.last;
+      bool isDuplicate = false;
 
-      final distance = math.sqrt(
-        math.pow(current.dx - last.dx, 2) + math.pow(current.dy - last.dy, 2),
-      );
+      // Check against all existing points, not just the last one
+      for (final existing in result) {
+        final distance = math.sqrt(
+          math.pow(current.dx - existing.dx, 2) +
+              math.pow(current.dy - existing.dy, 2),
+        );
 
-      if (distance > tolerance) {
+        if (distance <= tolerance) {
+          isDuplicate = true;
+          break;
+        }
+      }
+
+      if (!isDuplicate) {
         result.add(current);
       }
     }
@@ -491,7 +540,7 @@ class SvgJointDetector {
   /// Detects joints from a Flutter Path object
   static List<Offset> detectJointsFromPath(
     ui.Path path, {
-    double duplicateTolerance = 0.1,
+    double duplicateTolerance = 2.0,
   }) {
     final joints = <Offset>[];
     final metrics = path.computeMetrics();
@@ -598,7 +647,7 @@ class SvgJointDetector {
   static JointAnalysis analyzePathJoints(
     String pathData, {
     bool includeControlPoints = true,
-    double duplicateTolerance = 0.1,
+    double duplicateTolerance = 2.0,
   }) {
     final joints = detectJoints(
       pathData,

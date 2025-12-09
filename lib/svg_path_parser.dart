@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:xml/xml.dart';
 import 'package:path_drawing/path_drawing.dart';
 import 'dart:ui' as ui;
+import 'dart:math' as math;
 
 /// SVG Path Parser
 /// Handles loading SVG files and converting path data to Flutter Path objects
@@ -51,11 +52,14 @@ class SvgPathParser {
       }
       
       // Remove duplicate vertices that are too close together
-      allVertices = _removeDuplicateVertices(allVertices, 8.0);
+      allVertices = _removeDuplicateVertices(allVertices, 5.0);
       
       // Add intersection vertices for complex paths
       allVertices.addAll(_detectPathIntersections(combinedPath));
-      allVertices = _removeDuplicateVertices(allVertices, 8.0);
+      allVertices = _removeDuplicateVertices(allVertices, 5.0);
+      
+      // Remove collinear points to reduce false vertices
+      allVertices = _removeCollinearVertices(allVertices, angleThreshold: 8.0);
       
       // Ensure minimum vertices by sampling the path if needed
       if (allVertices.length < 3) {
@@ -290,6 +294,51 @@ class SvgPathParser {
     return matches.map((m) => double.tryParse(m.group(0)!) ?? 0.0).toList();
   }
   
+  /// Remove collinear vertices (points that don't significantly change direction)
+  static List<Offset> _removeCollinearVertices(
+    List<Offset> vertices,
+    {double angleThreshold = 8.0,
+  }) {
+    if (vertices.length < 3) return vertices;
+
+    final result = <Offset>[vertices.first];
+    final threshold = angleThreshold * 3.14159 / 180; // Convert to radians
+
+    for (int i = 1; i < vertices.length - 1; i++) {
+      final prev = vertices[i - 1];
+      final current = vertices[i];
+      final next = vertices[i + 1];
+
+      // Calculate vectors
+      final v1x = current.dx - prev.dx;
+      final v1y = current.dy - prev.dy;
+      final v2x = next.dx - current.dx;
+      final v2y = next.dy - current.dy;
+
+      // Calculate angle between vectors using dot product
+      final dot = v1x * v2x + v1y * v2y;
+      final mag1 = math.sqrt(v1x * v1x + v1y * v1y);
+      final mag2 = math.sqrt(v2x * v2x + v2y * v2y);
+
+      if (mag1 > 1.0 && mag2 > 1.0) {
+        final cosAngle = (dot / (mag1 * mag2)).clamp(-1.0, 1.0);
+        final angle = math.acos(cosAngle);
+
+        // Keep points where direction changes significantly
+        // or if the point is far from both neighbors
+        if (angle > threshold || mag1 > 50 || mag2 > 50) {
+          result.add(current);
+        }
+      } else {
+        // Keep if segments are very short (might be important corners)
+        result.add(current);
+      }
+    }
+
+    result.add(vertices.last);
+    return result;
+  }
+
   /// Remove duplicate vertices that are too close together
   static List<Offset> _removeDuplicateVertices(List<Offset> vertices, double threshold) {
     if (vertices.isEmpty) return vertices;
@@ -330,7 +379,7 @@ class SvgPathParser {
       }
     }
     
-    return _removeDuplicateVertices(vertices, 10.0);
+    return _removeDuplicateVertices(vertices, 5.0);
   }
   
   /// Detect path intersections and near-intersections
@@ -362,8 +411,8 @@ class SvgPathParser {
     }
     
     // Check for intersections between different segments
-    // A point is considered an intersection if segments come within 4 pixels
-    const intersectionThreshold = 4.0;
+    // A point is considered an intersection if segments come within 3 pixels
+    const intersectionThreshold = 3.0;
     
     for (int i = 0; i < segmentSamples.length; i++) {
       for (int j = i + 1; j < segmentSamples.length; j++) {
