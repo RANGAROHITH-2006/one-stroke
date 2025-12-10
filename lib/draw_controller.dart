@@ -1,11 +1,14 @@
 import 'package:flutter/material.dart';
 import 'dart:ui' as ui;
 import 'package:singlelinedraw/svg_path_parser.dart';
+import 'package:singlelinedraw/models/vertex_model.dart';
+import 'package:singlelinedraw/models/segment_model.dart';
+import 'package:singlelinedraw/models/connection_graph.dart';
 
 /// Draw Controller
 /// Manages the drawing interaction, path validation, and game state
 /// Handles gesture recognition, progress tracking, and completion detection
-/// Now with vertex-aware segment drawing for better path tracing
+/// Now with ID-based vertex-segment graph for accurate path tracing
 class DrawController extends ChangeNotifier {
   // Game state
   bool isDrawing = false;
@@ -19,26 +22,27 @@ class DrawController extends ChangeNotifier {
   double tolerance =
       16.0; // Hit detection tolerance in pixels (optimized for accuracy)
 
-  // Continuous range-based tracking (instead of discrete dots)
-  // Each segment has a list of drawn ranges [start, end] along its length
-  List<List<List<double>>> drawnRanges =
-      []; // [segmentIndex][rangeIndex][start, end]
+  // ID-based tracking system
+  ConnectionGraph? _graph;
 
-  // Track the currently active segment index to prevent filling multiple edges at vertices
-  int? _activeSegmentIndex;
+  // Track drawn ranges by segment ID (not index)
+  Map<int, List<List<double>>> drawnRangesBySegmentId = {};
+
+  // Track the currently active segment by ID
+  int? _activeSegmentId;
   double? _lastDistanceOnSegment;
 
   // Track drawing direction
   bool? _drawingForward; // true = toward end, false = toward start
 
   // Track which segments have been significantly drawn (> 20% filled)
-  Set<int> _drawnSegments = {};
+  Set<int> _drawnSegmentIds = {};
 
-  // Path metrics
+  // Path metrics (kept for compatibility)
   List<ui.PathMetric> pathSegments = [];
   double totalPathLength = 0.0;
 
-  // Vertex-based segments
+  // Vertex-based segments (legacy, will be replaced by graph)
   List<PathSegmentInfo> vertexSegments = [];
   List<Offset> transformedVertices = [];
 
@@ -54,8 +58,17 @@ class DrawController extends ChangeNotifier {
     pathSegments = SvgPathParser.getPathSegments(transformedPath);
     totalPathLength = SvgPathParser.getPathLength(transformedPath);
 
-    // Initialize empty ranges for each segment
-    drawnRanges = List.generate(pathSegments.length, (_) => []);
+    // Build connection graph
+    _graph = GraphBuilder.buildFromPath(pathSegments, []);
+
+    // Initialize empty ranges for each segment ID
+    drawnRangesBySegmentId.clear();
+    for (var segmentId in _graph!.segments.keys) {
+      drawnRangesBySegmentId[segmentId] = [];
+    }
+
+    // Print debug info
+    _graph?.printDebugInfo();
 
     reset();
   }
@@ -67,7 +80,7 @@ class DrawController extends ChangeNotifier {
     totalPathLength = SvgPathParser.getPathLength(transformedPath);
     transformedVertices = vertices;
 
-    // Extract vertex-based segments
+    // Extract vertex-based segments (legacy)
     vertexSegments = SvgPathParser.extractSegmentsWithVertices(
       transformedPath,
       vertices,
@@ -79,8 +92,17 @@ class DrawController extends ChangeNotifier {
       _createDefaultVertexSegments();
     }
 
-    // Initialize empty ranges for each segment
-    drawnRanges = List.generate(pathSegments.length, (_) => []);
+    // Build ID-based connection graph
+    _graph = GraphBuilder.buildFromPath(pathSegments, vertices);
+
+    // Initialize empty ranges for each segment ID
+    drawnRangesBySegmentId.clear();
+    for (var segmentId in _graph!.segments.keys) {
+      drawnRangesBySegmentId[segmentId] = [];
+    }
+
+    // Print debug info
+    _graph?.printDebugInfo();
 
     reset();
   }
@@ -147,14 +169,19 @@ class DrawController extends ChangeNotifier {
       userPath.clear();
       userPath.add(localPosition);
 
-      // Reset ranges for all segments
-      drawnRanges = List.generate(pathSegments.length, (_) => []);
+      // Reset ranges for all segments by ID
+      drawnRangesBySegmentId.clear();
+      if (_graph != null) {
+        for (var segmentId in _graph!.segments.keys) {
+          drawnRangesBySegmentId[segmentId] = [];
+        }
+      }
 
       // Reset active segment tracking
-      _activeSegmentIndex = null;
+      _activeSegmentId = null;
       _lastDistanceOnSegment = null;
       _drawingForward = null;
-      _drawnSegments.clear();
+      _drawnSegmentIds.clear();
 
       progress = 0.0;
       errorMessage = null;
@@ -219,117 +246,101 @@ class DrawController extends ChangeNotifier {
     progress = 0.0;
     errorMessage = null;
     userPath.clear();
-    drawnRanges = List.generate(pathSegments.length, (_) => []);
-    _activeSegmentIndex = null;
+
+    // Reset drawn ranges by segment ID
+    drawnRangesBySegmentId.clear();
+    if (_graph != null) {
+      for (var segmentId in _graph!.segments.keys) {
+        drawnRangesBySegmentId[segmentId] = [];
+      }
+    }
+
+    _activeSegmentId = null;
     _lastDistanceOnSegment = null;
     _drawingForward = null;
-    _drawnSegments.clear();
+    _drawnSegmentIds.clear();
     onGameReset?.call();
     notifyListeners();
   }
 
-  /// Check if a point is on or near the SVG path
+  /// Check if a point is on or near the SVG path using ID-based system
   bool _isPointOnPath(Offset point) {
-    if (svgPath == null) return false;
+    if (svgPath == null || _graph == null) return false;
 
     // Optimization: Check active segment first (most likely to be on it)
-    // Use fine-grained sampling for smooth movement without stuttering
-    if (_activeSegmentIndex != null &&
-        _activeSegmentIndex! < pathSegments.length) {
-      final pathMetric = pathSegments[_activeSegmentIndex!];
-      final length = pathMetric.length;
-
-      // Use very fine sampling (0.5 steps) for smooth, accurate detection
-      // Slightly relaxed tolerance for active segment to prevent stuttering
-      double activeTolerance = tolerance * 1.2;
-      for (double distance = 0; distance < length; distance += 0.5) {
-        final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
-        if (tangent != null) {
-          final double currentDistance = (point - tangent.position).distance;
-          if (currentDistance <= activeTolerance) {
-            return true;
-          }
+    if (_activeSegmentId != null) {
+      final activeSegment = _graph!.segments[_activeSegmentId];
+      if (activeSegment != null) {
+        final result = activeSegment.findClosestPosition(
+          point,
+          tolerance: tolerance * 1.2,
+        );
+        if (result != null) {
+          return true;
         }
       }
     }
 
-    // If not on active segment, check all segments with fine sampling
-    for (ui.PathMetric pathMetric in pathSegments) {
-      final length = pathMetric.length;
-
-      // Use fine steps (0.5) for accurate detection across all segments
-      for (double distance = 0; distance < length; distance += 0.5) {
-        final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
-        if (tangent != null) {
-          final double currentDistance = (point - tangent.position).distance;
-          if (currentDistance <= tolerance) {
-            return true;
-          }
-        }
+    // If not on active segment, check all segments
+    for (var segment in _graph!.segments.values) {
+      final result = segment.findClosestPosition(point, tolerance: tolerance);
+      if (result != null) {
+        return true;
       }
     }
+
     return false;
   }
 
-  /// Initialize segment with auto-fill to nearest endpoint
-  /// When user starts from middle, auto-fill to the closest endpoint
+  /// Initialize segment with auto-fill to nearest endpoint using ID-based system
   void _initializeSegmentWithAutoFill(Offset point) {
-    // Find the closest point on the path
-    int? bestSegmentIndex;
-    double? bestDistance;
-    double bestMinDist = double.infinity;
+    if (_graph == null) return;
 
-    for (
-      int segmentIndex = 0;
-      segmentIndex < pathSegments.length;
-      segmentIndex++
-    ) {
-      final pathMetric = pathSegments[segmentIndex];
-      final length = pathMetric.length;
+    // Find the closest segment and position using ID-based system
+    int? bestSegmentId;
+    SegmentPosition? bestPosition;
+    double bestDistance = double.infinity;
 
-      // Use very fine steps (0.5) for accurate starting point detection
-      for (double distance = 0; distance <= length; distance += 0.5) {
-        final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
-        if (tangent != null) {
-          final double currentDist = (point - tangent.position).distance;
-          if (currentDist <= tolerance && currentDist < bestMinDist) {
-            bestMinDist = currentDist;
-            bestSegmentIndex = segmentIndex;
-            bestDistance = distance;
-          }
-        }
+    for (var segment in _graph!.segments.values) {
+      final position = segment.findClosestPosition(point, tolerance: tolerance);
+      if (position != null && position.screenDistance < bestDistance) {
+        bestDistance = position.screenDistance;
+        bestSegmentId = segment.segmentId;
+        bestPosition = position;
       }
     }
 
-    if (bestSegmentIndex == null || bestDistance == null) return;
+    if (bestSegmentId == null || bestPosition == null) return;
 
-    _activeSegmentIndex = bestSegmentIndex;
-    _lastDistanceOnSegment = bestDistance;
-
-    final pathMetric = pathSegments[bestSegmentIndex];
-    final length = pathMetric.length;
+    final segment = _graph!.segments[bestSegmentId]!;
+    _activeSegmentId = bestSegmentId;
+    _lastDistanceOnSegment = bestPosition.distanceAlongSegment;
 
     // Determine which endpoint is closer
-    double distToStart = bestDistance;
-    double distToEnd = length - bestDistance;
+    double distToStart = bestPosition.distanceAlongSegment;
+    double distToEnd = segment.length - bestPosition.distanceAlongSegment;
 
     // Auto-fill from start point to the NEAREST endpoint
     if (distToStart <= distToEnd) {
       // Closer to start - fill from 0 to current position
-      _addRange(bestSegmentIndex, 0.0, bestDistance);
+      _addRangeById(bestSegmentId, 0.0, bestPosition.distanceAlongSegment);
       _drawingForward = true; // Will draw toward the end
     } else {
       // Closer to end - fill from current position to end
-      _addRange(bestSegmentIndex, bestDistance, length);
+      _addRangeById(
+        bestSegmentId,
+        bestPosition.distanceAlongSegment,
+        segment.length,
+      );
       _drawingForward = false; // Will draw toward the start
     }
   }
 
-  /// Add a range to a segment, merging with existing overlapping ranges
-  void _addRange(int segmentIndex, double start, double end) {
-    if (segmentIndex >= drawnRanges.length) return;
+  /// Add a range to a segment by ID, merging with existing overlapping ranges
+  void _addRangeById(int segmentId, double start, double end) {
+    if (!drawnRangesBySegmentId.containsKey(segmentId)) return;
 
-    List<List<double>> ranges = drawnRanges[segmentIndex];
+    List<List<double>> ranges = drawnRangesBySegmentId[segmentId]!;
 
     // Find overlapping or adjacent ranges and merge
     List<List<double>> newRanges = [];
@@ -361,7 +372,7 @@ class DrawController extends ChangeNotifier {
       }
     }
 
-    drawnRanges[segmentIndex] = finalRanges;
+    drawnRangesBySegmentId[segmentId] = finalRanges;
   }
 
   /// Fill path between two points with gap auto-fill and strict single-segment control
@@ -371,26 +382,33 @@ class DrawController extends ChangeNotifier {
     double screenDistance = (endPoint - startPoint).distance;
 
     // STRICT SINGLE-SEGMENT RULE: Only work on the active segment
-    if (_activeSegmentIndex == null || _lastDistanceOnSegment == null) {
+    if (_activeSegmentId == null ||
+        _lastDistanceOnSegment == null ||
+        _graph == null) {
       return;
     }
 
+    final activeSegment = _graph!.segments[_activeSegmentId];
+    if (activeSegment == null) return;
+
     // Find where the end point is on the ACTIVE segment only
-    double? endDistOnActive = _findClosestDistanceOnSegment(
+    SegmentPosition? endPosition = activeSegment.findClosestPosition(
       endPoint,
-      _activeSegmentIndex!,
+      tolerance: tolerance * 1.3,
     );
 
     // If point is not on active segment, check if we should transition
-    if (endDistOnActive == null) {
+    if (endPosition == null) {
       // Only transition if we're at an endpoint and there's a connected segment
       _checkAndTransitionAtEndpoint(endPoint, screenDistance);
       return;
     }
 
+    double endDistOnActive = endPosition.distanceAlongSegment;
+
     // Calculate path distance on the active segment
     double pathDistance = (endDistOnActive - _lastDistanceOnSegment!).abs();
-    final length = pathSegments[_activeSegmentIndex!].length;
+    final length = activeSegment.length;
 
     // Check if movement is in the correct direction
     bool movingForward = endDistOnActive > _lastDistanceOnSegment!;
@@ -427,8 +445,8 @@ class DrawController extends ChangeNotifier {
             : endDistOnActive;
 
     // Auto-fill the gap between last and current position
-    _addRange(
-      _activeSegmentIndex!,
+    _addRangeById(
+      _activeSegmentId!,
       rangeStart.clamp(0, length),
       rangeEnd.clamp(0, length),
     );
@@ -436,221 +454,153 @@ class DrawController extends ChangeNotifier {
     _lastDistanceOnSegment = endDistOnActive;
 
     // Mark segment as drawn if it's significantly filled
-    if (_getSegmentFilledRatio(_activeSegmentIndex!) > 0.2) {
-      _drawnSegments.add(_activeSegmentIndex!);
+    if (_getSegmentFilledRatioById(_activeSegmentId!) > 0.2) {
+      _drawnSegmentIds.add(_activeSegmentId!);
     }
   }
 
-  /// Check if we're at an endpoint and should transition to a connected segment
+  /// Check if we're at an endpoint and should transition to a connected segment using ID-based graph
   void _checkAndTransitionAtEndpoint(Offset point, double screenDistance) {
-    if (_activeSegmentIndex == null || _lastDistanceOnSegment == null) return;
+    if (_activeSegmentId == null ||
+        _lastDistanceOnSegment == null ||
+        _graph == null)
+      return;
 
-    final activeMetric = pathSegments[_activeSegmentIndex!];
-    final activeLength = activeMetric.length;
+    final activeSegment = _graph!.segments[_activeSegmentId];
+    if (activeSegment == null) return;
 
     // Check if we're AT an endpoint (relaxed for smooth transitions)
     bool nearStart = _lastDistanceOnSegment! < tolerance * 2.5;
-    bool nearEnd = _lastDistanceOnSegment! > activeLength - tolerance * 2.5;
+    bool nearEnd =
+        _lastDistanceOnSegment! > activeSegment.length - tolerance * 2.5;
 
     if (!nearStart && !nearEnd) {
       // Not at an endpoint - don't transition
       return;
     }
 
-    // Get the endpoint position
-    Offset? endpointPos;
-    if (nearEnd) {
-      final tangent = activeMetric.getTangentForOffset(activeLength);
-      endpointPos = tangent?.position;
-    } else if (nearStart) {
-      final tangent = activeMetric.getTangentForOffset(0);
-      endpointPos = tangent?.position;
-    }
+    // Find connected segments using the graph
+    List<int> connectedSegmentIds = _graph!.findConnectedSegments(
+      _activeSegmentId!,
+      _lastDistanceOnSegment!,
+    );
 
-    if (endpointPos == null) return;
+    // Skip already drawn segments
+    connectedSegmentIds =
+        connectedSegmentIds
+            .where((id) => !_drawnSegmentIds.contains(id))
+            .toList();
 
-    // Find ONE connected segment
-    int? bestNewSegment;
-    double? bestDistanceOnNewSegment;
-    double bestMinDist = double.infinity;
+    if (connectedSegmentIds.isEmpty) return;
 
-    for (
-      int segmentIndex = 0;
-      segmentIndex < pathSegments.length;
-      segmentIndex++
-    ) {
-      if (segmentIndex == _activeSegmentIndex) continue;
+    // Find the best segment to transition to
+    int? bestNewSegmentId;
+    SegmentPosition? bestPosition;
+    double bestDist = double.infinity;
 
-      // Skip already drawn segments
-      if (_drawnSegments.contains(segmentIndex)) continue;
+    for (var segmentId in connectedSegmentIds) {
+      final segment = _graph!.segments[segmentId];
+      if (segment == null) continue;
 
-      final pathMetric = pathSegments[segmentIndex];
-      final length = pathMetric.length;
-
-      // Check if this segment connects to our endpoint
-      final startTangent = pathMetric.getTangentForOffset(0);
-      final endTangent = pathMetric.getTangentForOffset(length);
-
-      bool connectsAtStart =
-          startTangent != null &&
-          (startTangent.position - endpointPos).distance < tolerance * 3.0;
-      bool connectsAtEnd =
-          endTangent != null &&
-          (endTangent.position - endpointPos).distance < tolerance * 3.0;
-
-      if (!connectsAtStart && !connectsAtEnd) continue;
-
-      // Check if the current point is on this segment near the connection
-      double? distOnSegment = _findClosestDistanceOnSegment(
+      // Check if the current point is on this segment
+      final position = segment.findClosestPosition(
         point,
-        segmentIndex,
+        tolerance: tolerance * 3.5,
       );
+      if (position != null && position.screenDistance < bestDist) {
+        // Check if we're near a connection point
+        bool nearConnectionStart =
+            position.distanceAlongSegment < tolerance * 3.5;
+        bool nearConnectionEnd =
+            position.distanceAlongSegment > segment.length - tolerance * 3.5;
 
-      if (distOnSegment != null) {
-        // Must be near the connection point (relaxed for smooth transitions)
-        double expectedDist = connectsAtStart ? 0 : length;
-        double distFromConnection = (distOnSegment - expectedDist).abs();
-
-        if (distFromConnection < tolerance * 3.5) {
-          final currentDist = _getDistanceFromPoint(
-            point,
-            segmentIndex,
-            distOnSegment,
-          );
-          if (currentDist < bestMinDist) {
-            bestMinDist = currentDist;
-            bestNewSegment = segmentIndex;
-            bestDistanceOnNewSegment = distOnSegment;
-          }
+        if (nearConnectionStart || nearConnectionEnd) {
+          bestDist = position.screenDistance;
+          bestNewSegmentId = segmentId;
+          bestPosition = position;
         }
       }
     }
 
     // Transition if found
-    if (bestNewSegment != null && bestDistanceOnNewSegment != null) {
+    if (bestNewSegmentId != null && bestPosition != null) {
+      final newSegment = _graph!.segments[bestNewSegmentId]!;
+
       // Fill to end of current segment
-      final length = pathSegments[_activeSegmentIndex!].length;
       if (nearEnd) {
-        _addRange(_activeSegmentIndex!, _lastDistanceOnSegment!, length);
+        _addRangeById(
+          _activeSegmentId!,
+          _lastDistanceOnSegment!,
+          activeSegment.length,
+        );
       } else if (nearStart) {
-        _addRange(_activeSegmentIndex!, 0, _lastDistanceOnSegment!);
+        _addRangeById(_activeSegmentId!, 0, _lastDistanceOnSegment!);
       }
 
       // Mark old segment as completed
-      _drawnSegments.add(_activeSegmentIndex!);
+      _drawnSegmentIds.add(_activeSegmentId!);
 
       // Switch to new segment
-      _activeSegmentIndex = bestNewSegment;
-      _lastDistanceOnSegment = bestDistanceOnNewSegment;
+      _activeSegmentId = bestNewSegmentId;
+      _lastDistanceOnSegment = bestPosition.distanceAlongSegment;
       _drawingForward = null;
 
       // Auto-fill from touch point to nearest endpoint
-      final newMetric = pathSegments[bestNewSegment];
-      final newLength = newMetric.length;
-      final startTangent = newMetric.getTangentForOffset(0);
+      double distToStart = bestPosition.distanceAlongSegment;
+      double distToEnd = newSegment.length - bestPosition.distanceAlongSegment;
 
-      bool connectsAtStart =
-          startTangent != null &&
-          (startTangent.position - endpointPos).distance < tolerance * 3.0;
-
-      double distToStart = bestDistanceOnNewSegment;
-      double distToEnd = newLength - bestDistanceOnNewSegment;
-
-      if (connectsAtStart) {
-        if (distToStart <= distToEnd) {
-          _addRange(bestNewSegment, 0, bestDistanceOnNewSegment);
-        } else {
-          _addRange(bestNewSegment, bestDistanceOnNewSegment, newLength);
-        }
+      if (distToStart <= distToEnd) {
+        _addRangeById(bestNewSegmentId, 0, bestPosition.distanceAlongSegment);
       } else {
-        if (distToEnd <= distToStart) {
-          _addRange(bestNewSegment, bestDistanceOnNewSegment, newLength);
-        } else {
-          _addRange(bestNewSegment, 0, bestDistanceOnNewSegment);
-        }
+        _addRangeById(
+          bestNewSegmentId,
+          bestPosition.distanceAlongSegment,
+          newSegment.length,
+        );
       }
     }
   }
 
-  /// Calculate what ratio of a segment has been filled
-  double _getSegmentFilledRatio(int segmentIndex) {
-    if (segmentIndex >= pathSegments.length ||
-        segmentIndex >= drawnRanges.length) {
-      return 0.0;
-    }
+  /// Calculate what ratio of a segment has been filled by ID
+  double _getSegmentFilledRatioById(int segmentId) {
+    final segment = _graph?.segments[segmentId];
+    if (segment == null) return 0.0;
 
-    final segmentLength = pathSegments[segmentIndex].length;
+    final segmentLength = segment.length;
     if (segmentLength == 0) return 0.0;
 
+    final ranges = drawnRangesBySegmentId[segmentId];
+    if (ranges == null || ranges.isEmpty) return 0.0;
+
     double filledLength = 0;
-    for (var range in drawnRanges[segmentIndex]) {
+    for (var range in ranges) {
       filledLength += range[1] - range[0];
     }
 
     return filledLength / segmentLength;
   }
 
-  /// Helper to get screen distance from a point to a specific position on a segment
-  double _getDistanceFromPoint(
-    Offset point,
-    int segmentIndex,
-    double distanceOnPath,
-  ) {
-    final pathMetric = pathSegments[segmentIndex];
-    final tangent = pathMetric.getTangentForOffset(distanceOnPath);
-    if (tangent == null) return double.infinity;
-    return (point - tangent.position).distance;
-  }
-
-  /// Find the closest distance along a segment for a given point
-  double? _findClosestDistanceOnSegment(Offset point, int segmentIndex) {
-    final pathMetric = pathSegments[segmentIndex];
-    final length = pathMetric.length;
-
-    double? closestDistance;
-    double minDist = double.infinity;
-
-    // Use consistent fine sampling (0.5 steps) for accurate distance finding
-    // This prevents stuttering and ensures smooth movement
-    for (double distance = 0; distance <= length; distance += 0.5) {
-      final ui.Tangent? tangent = pathMetric.getTangentForOffset(distance);
-      if (tangent != null) {
-        final double currentDist = (point - tangent.position).distance;
-        if (currentDist <= tolerance * 1.3 && currentDist < minDist) {
-          minDist = currentDist;
-          closestDistance = distance;
-        }
-      }
-    }
-
-    return closestDistance;
-  }
-
-  /// Update progress based on drawn ranges (continuous line tracking)
+  /// Update progress based on drawn ranges by ID (continuous line tracking)
   void _updateProgress() {
-    if (totalPathLength == 0) return;
+    if (totalPathLength == 0 || _graph == null) return;
 
     double drawnLength = 0;
     double actualTotalLength = 0;
 
-    // Calculate both drawn length and actual total length from path segments
-    // This handles cases where SVGs have overlapping paths
-    for (
-      int segmentIndex = 0;
-      segmentIndex < pathSegments.length;
-      segmentIndex++
-    ) {
-      final segmentLength = pathSegments[segmentIndex].length;
-      actualTotalLength += segmentLength;
+    // Calculate both drawn length and actual total length using ID-based system
+    for (var segment in _graph!.segments.values) {
+      actualTotalLength += segment.length;
 
-      // Sum up all drawn ranges for this segment
-      for (var range in drawnRanges[segmentIndex]) {
-        drawnLength += range[1] - range[0];
+      // Sum up all drawn ranges for this segment by ID
+      final ranges = drawnRangesBySegmentId[segment.segmentId];
+      if (ranges != null) {
+        for (var range in ranges) {
+          drawnLength += range[1] - range[0];
+        }
       }
     }
 
     // Use actualTotalLength if it differs from totalPathLength
-    // This happens when the SVG has multiple overlapping paths
     final targetLength =
         actualTotalLength > 0 ? actualTotalLength : totalPathLength;
     progress = (drawnLength / targetLength).clamp(0.0, 1.0);
@@ -688,5 +638,72 @@ class DrawController extends ChangeNotifier {
   bool get hasError => errorMessage != null;
 
   /// Get drawn ranges for painter (for visual rendering)
-  List<List<List<double>>> get getDrawnRanges => drawnRanges;
+  /// Converts ID-based tracking to PathMetric-absolute ranges
+  List<List<List<double>>> get getDrawnRanges {
+    if (_graph == null) return [];
+
+    // Build ranges per PathMetric (not per segment)
+    List<List<List<double>>> pathMetricRanges = List.generate(
+      pathSegments.length,
+      (_) => [],
+    );
+
+    // For each segment, convert its ranges to absolute PathMetric positions
+    for (var segment in _graph!.segments.values) {
+      final segmentRanges = drawnRangesBySegmentId[segment.segmentId];
+      if (segmentRanges == null || segmentRanges.isEmpty) continue;
+
+      // Find which PathMetric index this segment belongs to
+      int pathMetricIndex = -1;
+      for (int i = 0; i < pathSegments.length; i++) {
+        if (pathSegments[i] == segment.pathMetric) {
+          pathMetricIndex = i;
+          break;
+        }
+      }
+
+      if (pathMetricIndex == -1) continue;
+
+      // Convert segment-relative ranges to PathMetric-absolute ranges
+      for (var range in segmentRanges) {
+        double absoluteStart = segment.startOffsetOnPath + range[0];
+        double absoluteEnd = segment.startOffsetOnPath + range[1];
+
+        // Add to the PathMetric's range list
+        pathMetricRanges[pathMetricIndex].add([absoluteStart, absoluteEnd]);
+      }
+    }
+
+    // Merge overlapping ranges for each PathMetric
+    for (int i = 0; i < pathMetricRanges.length; i++) {
+      pathMetricRanges[i] = _mergeRanges(pathMetricRanges[i]);
+    }
+
+    return pathMetricRanges;
+  }
+
+  /// Merge overlapping or adjacent ranges
+  List<List<double>> _mergeRanges(List<List<double>> ranges) {
+    if (ranges.isEmpty) return [];
+
+    // Sort by start position
+    ranges.sort((a, b) => a[0].compareTo(b[0]));
+
+    List<List<double>> merged = [ranges[0]];
+
+    for (int i = 1; i < ranges.length; i++) {
+      final current = ranges[i];
+      final last = merged.last;
+
+      // Check if ranges overlap or are adjacent (within 2 pixels)
+      if (current[0] <= last[1] + 2) {
+        // Merge ranges
+        last[1] = current[1] > last[1] ? current[1] : last[1];
+      } else {
+        merged.add(current);
+      }
+    }
+
+    return merged;
+  }
 }
