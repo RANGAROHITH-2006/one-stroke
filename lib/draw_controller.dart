@@ -20,7 +20,7 @@ class DrawController extends ChangeNotifier {
   List<Offset> userPath = [];
   Path? svgPath;
   double tolerance =
-      16.0; // Hit detection tolerance in pixels (optimized for accuracy)
+      20.0; // Hit detection tolerance in pixels (increased for better coverage)
 
   // ID-based tracking system
   ConnectionGraph? _graph;
@@ -273,7 +273,7 @@ class DrawController extends ChangeNotifier {
       if (activeSegment != null) {
         final result = activeSegment.findClosestPosition(
           point,
-          tolerance: tolerance * 1.2,
+          tolerance: tolerance * 1.6,
         );
         if (result != null) {
           return true;
@@ -281,9 +281,23 @@ class DrawController extends ChangeNotifier {
       }
     }
 
-    // If not on active segment, check all segments
+    // If not on active segment, check all segments with increased tolerance
     for (var segment in _graph!.segments.values) {
-      final result = segment.findClosestPosition(point, tolerance: tolerance);
+      final result = segment.findClosestPosition(
+        point,
+        tolerance: tolerance * 1.1,
+      );
+      if (result != null) {
+        return true;
+      }
+    }
+
+    // Final fallback: check with even higher tolerance for edge cases
+    for (var segment in _graph!.segments.values) {
+      final result = segment.findClosestPosition(
+        point,
+        tolerance: tolerance * 1.8,
+      );
       if (result != null) {
         return true;
       }
@@ -302,7 +316,10 @@ class DrawController extends ChangeNotifier {
     double bestDistance = double.infinity;
 
     for (var segment in _graph!.segments.values) {
-      final position = segment.findClosestPosition(point, tolerance: tolerance);
+      final position = segment.findClosestPosition(
+        point,
+        tolerance: tolerance * 1.5,
+      );
       if (position != null && position.screenDistance < bestDistance) {
         bestDistance = position.screenDistance;
         bestSegmentId = segment.segmentId;
@@ -310,11 +327,18 @@ class DrawController extends ChangeNotifier {
       }
     }
 
-    if (bestSegmentId == null || bestPosition == null) return;
+    if (bestSegmentId == null || bestPosition == null) {
+      print('⚠️ No segment found at starting point!');
+      return;
+    }
 
     final segment = _graph!.segments[bestSegmentId]!;
     _activeSegmentId = bestSegmentId;
     _lastDistanceOnSegment = bestPosition.distanceAlongSegment;
+
+    print(
+      '✅ Started on Segment $bestSegmentId at distance ${bestPosition.distanceAlongSegment.toStringAsFixed(1)}',
+    );
 
     // Determine which endpoint is closer
     double distToStart = bestPosition.distanceAlongSegment;
@@ -394,7 +418,7 @@ class DrawController extends ChangeNotifier {
     // Find where the end point is on the ACTIVE segment only
     SegmentPosition? endPosition = activeSegment.findClosestPosition(
       endPoint,
-      tolerance: tolerance * 1.3,
+      tolerance: tolerance * 1.6,
     );
 
     // If point is not on active segment, check if we should transition
@@ -413,19 +437,22 @@ class DrawController extends ChangeNotifier {
     // Check if movement is in the correct direction
     bool movingForward = endDistOnActive > _lastDistanceOnSegment!;
 
-    // Set drawing direction on first movement
+    // Set drawing direction on first movement (but allow direction changes for flexibility)
     if (_drawingForward == null) {
       _drawingForward = movingForward;
     }
 
     // ADJACENT POINT CHECK: Only fill if points are truly adjacent
-    // Use strict multiplier to prevent filling multiple segments at once
-    // This ensures user must trace each segment accurately
-    double maxAllowedPathDistance = screenDistance * 1.8 + tolerance * 2;
+    // Use very relaxed multiplier for smoother drawing experience
+    // Increased to allow better coverage on all segments
+    double maxAllowedPathDistance = screenDistance * 3.0 + tolerance * 3.0;
 
     // If path distance is much larger than screen distance, points aren't adjacent
     if (pathDistance > maxAllowedPathDistance) {
       // Not adjacent - don't fill this gap
+      print(
+        '⚠️ Gap too large: path=$pathDistance, screen=$screenDistance, max=$maxAllowedPathDistance',
+      );
       return;
     }
 
@@ -453,8 +480,9 @@ class DrawController extends ChangeNotifier {
 
     _lastDistanceOnSegment = endDistOnActive;
 
-    // Mark segment as drawn if it's significantly filled
-    if (_getSegmentFilledRatioById(_activeSegmentId!) > 0.2) {
+    // Mark segment as significantly filled if > 80% complete
+    // Lower threshold allows partial fills without blocking re-entry
+    if (_getSegmentFilledRatioById(_activeSegmentId!) > 0.8) {
       _drawnSegmentIds.add(_activeSegmentId!);
     }
   }
@@ -470,9 +498,9 @@ class DrawController extends ChangeNotifier {
     if (activeSegment == null) return;
 
     // Check if we're AT an endpoint (relaxed for smooth transitions)
-    bool nearStart = _lastDistanceOnSegment! < tolerance * 2.5;
+    bool nearStart = _lastDistanceOnSegment! < tolerance * 3.0;
     bool nearEnd =
-        _lastDistanceOnSegment! > activeSegment.length - tolerance * 2.5;
+        _lastDistanceOnSegment! > activeSegment.length - tolerance * 3.0;
 
     if (!nearStart && !nearEnd) {
       // Not at an endpoint - don't transition
@@ -485,13 +513,16 @@ class DrawController extends ChangeNotifier {
       _lastDistanceOnSegment!,
     );
 
-    // Skip already drawn segments
-    connectedSegmentIds =
-        connectedSegmentIds
-            .where((id) => !_drawnSegmentIds.contains(id))
-            .toList();
+    // Don't skip already drawn segments - allow re-entry for partial fills
+    // This fixes the issue where some segments can't be entered
+    // connectedSegmentIds = connectedSegmentIds
+    //     .where((id) => !_drawnSegmentIds.contains(id))
+    //     .toList();
 
-    if (connectedSegmentIds.isEmpty) return;
+    if (connectedSegmentIds.isEmpty) {
+      print('⚠️ No connected segments found from segment $_activeSegmentId');
+      return;
+    }
 
     // Find the best segment to transition to
     int? bestNewSegmentId;
@@ -505,14 +536,14 @@ class DrawController extends ChangeNotifier {
       // Check if the current point is on this segment
       final position = segment.findClosestPosition(
         point,
-        tolerance: tolerance * 3.5,
+        tolerance: tolerance * 4.0,
       );
       if (position != null && position.screenDistance < bestDist) {
         // Check if we're near a connection point
         bool nearConnectionStart =
-            position.distanceAlongSegment < tolerance * 3.5;
+            position.distanceAlongSegment < tolerance * 4.0;
         bool nearConnectionEnd =
-            position.distanceAlongSegment > segment.length - tolerance * 3.5;
+            position.distanceAlongSegment > segment.length - tolerance * 4.0;
 
         if (nearConnectionStart || nearConnectionEnd) {
           bestDist = position.screenDistance;
@@ -525,6 +556,10 @@ class DrawController extends ChangeNotifier {
     // Transition if found
     if (bestNewSegmentId != null && bestPosition != null) {
       final newSegment = _graph!.segments[bestNewSegmentId]!;
+
+      print(
+        '🔄 Transitioning from segment $_activeSegmentId to $bestNewSegmentId',
+      );
 
       // Fill to end of current segment
       if (nearEnd) {

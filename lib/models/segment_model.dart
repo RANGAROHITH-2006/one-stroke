@@ -61,9 +61,9 @@ class SegmentModel {
     double? closestDistanceOnSegment;
     double minDist = double.infinity;
 
-    // Sample only this segment's portion of the path
+    // Sample only this segment's portion of the path with fine sampling
     // Use startOffsetOnPath to calculate the absolute position on the PathMetric
-    for (double localDist = 0; localDist <= length; localDist += 0.5) {
+    for (double localDist = 0; localDist <= length; localDist += 0.3) {
       final absoluteDist = startOffsetOnPath + localDist;
 
       // Make sure we don't exceed the PathMetric length
