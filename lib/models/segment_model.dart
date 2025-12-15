@@ -54,6 +54,7 @@ class SegmentModel {
   /// Get the closest point on this segment to a given point
   /// Returns null if point is not close enough to the segment
   /// Now properly handles segments that are portions of a larger PathMetric
+  /// Uses adaptive sampling with finer steps at edges for better accuracy
   SegmentPosition? findClosestPosition(
     Offset point, {
     double tolerance = 16.0,
@@ -61,9 +62,27 @@ class SegmentModel {
     double? closestDistanceOnSegment;
     double minDist = double.infinity;
 
-    // Sample only this segment's portion of the path with fine sampling
-    // Use startOffsetOnPath to calculate the absolute position on the PathMetric
-    for (double localDist = 0; localDist <= length; localDist += 0.3) {
+    // EXPLICIT ENDPOINT CHECKS with higher tolerance for edge accuracy
+    double edgeTolerance = tolerance * 1.3;
+    
+    // Check start point
+    final startDist = (point - startPosition).distance;
+    if (startDist <= edgeTolerance) {
+      closestDistanceOnSegment = 0.0;
+      minDist = startDist;
+    }
+    
+    // Check end point
+    final endDist = (point - endPosition).distance;
+    if (endDist <= edgeTolerance && endDist < minDist) {
+      closestDistanceOnSegment = length;
+      minDist = endDist;
+    }
+
+    // ADAPTIVE SAMPLING: Use finer steps at edges, normal steps in middle
+    double edgeZone = length * 0.15; // First and last 15% of segment
+    
+    for (double localDist = 0; localDist <= length;) {
       final absoluteDist = startOffsetOnPath + localDist;
 
       // Make sure we don't exceed the PathMetric length
@@ -74,10 +93,13 @@ class SegmentModel {
         final currentDist = (point - tangent.position).distance;
         if (currentDist <= tolerance && currentDist < minDist) {
           minDist = currentDist;
-          closestDistanceOnSegment =
-              localDist; // Return distance relative to segment start
+          closestDistanceOnSegment = localDist;
         }
       }
+      
+      // Adaptive step size: 0.1px at edges, 0.3px in middle
+      bool isAtEdge = localDist < edgeZone || localDist > (length - edgeZone);
+      localDist += isAtEdge ? 0.1 : 0.3;
     }
 
     if (closestDistanceOnSegment != null) {

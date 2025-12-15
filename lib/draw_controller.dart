@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'dart:ui' as ui;
 import 'package:singlelinedraw/svg_path_parser.dart';
-import 'package:singlelinedraw/models/vertex_model.dart';
+// import 'package:singlelinedraw/models/vertex_model.dart';
 import 'package:singlelinedraw/models/segment_model.dart';
 import 'package:singlelinedraw/models/connection_graph.dart';
 
@@ -31,12 +31,13 @@ class DrawController extends ChangeNotifier {
   // Track the currently active segment by ID
   int? _activeSegmentId;
   double? _lastDistanceOnSegment;
-
-  // Track drawing direction
-  bool? _drawingForward; // true = toward end, false = toward start
+  double? _initialPositionOnSegment; // Where the user first touched this segment
 
   // Track which segments have been significantly drawn (> 20% filled)
   Set<int> _drawnSegmentIds = {};
+  
+  // Track segments that are 100% complete (never remove color from these)
+  Set<int> _fullyCompletedSegmentIds = {};
 
   // Path metrics (kept for compatibility)
   List<ui.PathMetric> pathSegments = [];
@@ -180,8 +181,9 @@ class DrawController extends ChangeNotifier {
       // Reset active segment tracking
       _activeSegmentId = null;
       _lastDistanceOnSegment = null;
-      _drawingForward = null;
+      _initialPositionOnSegment = null;
       _drawnSegmentIds.clear();
+      _fullyCompletedSegmentIds.clear();
 
       progress = 0.0;
       errorMessage = null;
@@ -257,8 +259,9 @@ class DrawController extends ChangeNotifier {
 
     _activeSegmentId = null;
     _lastDistanceOnSegment = null;
-    _drawingForward = null;
+    _initialPositionOnSegment = null;
     _drawnSegmentIds.clear();
+    _fullyCompletedSegmentIds.clear();
     onGameReset?.call();
     notifyListeners();
   }
@@ -316,6 +319,7 @@ class DrawController extends ChangeNotifier {
     double bestDistance = double.infinity;
 
     for (var segment in _graph!.segments.values) {
+      // Use higher tolerance for starting point to catch edges better
       final position = segment.findClosestPosition(
         point,
         tolerance: tolerance * 1.5,
@@ -335,6 +339,7 @@ class DrawController extends ChangeNotifier {
     final segment = _graph!.segments[bestSegmentId]!;
     _activeSegmentId = bestSegmentId;
     _lastDistanceOnSegment = bestPosition.distanceAlongSegment;
+    _initialPositionOnSegment = bestPosition.distanceAlongSegment; // Track where user started
 
     print(
       '✅ Started on Segment $bestSegmentId at distance ${bestPosition.distanceAlongSegment.toStringAsFixed(1)}',
@@ -348,7 +353,6 @@ class DrawController extends ChangeNotifier {
     if (distToStart <= distToEnd) {
       // Closer to start - fill from 0 to current position
       _addRangeById(bestSegmentId, 0.0, bestPosition.distanceAlongSegment);
-      _drawingForward = true; // Will draw toward the end
     } else {
       // Closer to end - fill from current position to end
       _addRangeById(
@@ -356,7 +360,6 @@ class DrawController extends ChangeNotifier {
         bestPosition.distanceAlongSegment,
         segment.length,
       );
-      _drawingForward = false; // Will draw toward the start
     }
   }
 
@@ -399,6 +402,67 @@ class DrawController extends ChangeNotifier {
     drawnRangesBySegmentId[segmentId] = finalRanges;
   }
 
+  /// Remove a range from a segment by ID (for backward drawing)
+  void _removeRangeById(int segmentId, double removeStart, double removeEnd) {
+    if (!drawnRangesBySegmentId.containsKey(segmentId)) return;
+
+    List<List<double>> ranges = drawnRangesBySegmentId[segmentId]!;
+    const double epsilon = 1e-9; // Small value to handle floating-point precision
+
+    List<List<double>> newRanges = [];
+
+    for (var range in ranges) {
+      double rangeStart = range[0];
+      double rangeEnd = range[1];
+
+      // If the removal range doesn't overlap, keep the range
+      if (removeEnd < rangeStart - epsilon || removeStart > rangeEnd + epsilon) {
+        newRanges.add([rangeStart, rangeEnd]);
+      } else {
+        // Partial overlap - split or trim the range
+        if (rangeStart < removeStart - epsilon) {
+          // Keep the part before removal
+          newRanges.add([rangeStart, removeStart - epsilon]);
+        }
+        if (rangeEnd > removeEnd + epsilon) {
+          // Keep the part after removal
+          newRanges.add([removeEnd + epsilon, rangeEnd]);
+        }
+      }
+    }
+
+    // Merge any remaining overlapping ranges after sorting
+    newRanges.sort((a, b) => a[0].compareTo(b[0]));
+    List<List<double>> finalRanges = [];
+    for (var range in newRanges) {
+      if (finalRanges.isEmpty || finalRanges.last[1] + epsilon < range[0]) {
+        finalRanges.add(range);
+      } else {
+        // Merge ranges by extending the end of the last range
+        finalRanges.last[1] =
+            finalRanges.last[1] > range[1] ? finalRanges.last[1] : range[1];
+      }
+    }
+
+    // Ensure active segment tracking is updated correctly
+    if (_activeSegmentId != null && drawnRangesBySegmentId.containsKey(_activeSegmentId!)) {
+      _lastDistanceOnSegment = finalRanges.isNotEmpty ? finalRanges.last[1] : null;
+    }
+
+    drawnRangesBySegmentId[segmentId] = finalRanges;
+  }
+
+  /// Auto-complete a segment by filling it entirely
+  void _autoCompleteSegment(int segmentId) {
+    final segment = _graph?.segments[segmentId];
+    if (segment == null) return;
+
+    // Fill the entire segment from 0 to length
+    drawnRangesBySegmentId[segmentId] = [
+      [0.0, segment.length]
+    ];
+  }
+
   /// Fill path between two points with gap auto-fill and strict single-segment control
   /// Implements: gap auto-fill for fast movements, strict single-line filling, partial filling
   void _fillPathBetweenOnActiveSegment(Offset startPoint, Offset endPoint) {
@@ -432,20 +496,17 @@ class DrawController extends ChangeNotifier {
 
     // Calculate path distance on the active segment
     double pathDistance = (endDistOnActive - _lastDistanceOnSegment!).abs();
-    final length = activeSegment.length;
+    double length = activeSegment.length;
 
-    // Check if movement is in the correct direction
-    bool movingForward = endDistOnActive > _lastDistanceOnSegment!;
-
-    // Set drawing direction on first movement (but allow direction changes for flexibility)
-    if (_drawingForward == null) {
-      _drawingForward = movingForward;
-    }
-
-    // ADJACENT POINT CHECK: Only fill if points are truly adjacent
-    // Use very relaxed multiplier for smoother drawing experience
-    // Increased to allow better coverage on all segments
-    double maxAllowedPathDistance = screenDistance * 3.0 + tolerance * 3.0;
+    // EDGE-AWARE GAP CHECK: More forgiving at edges for smooth transitions
+    bool nearEdge = endDistOnActive < tolerance * 2.5 || 
+                    endDistOnActive > length - tolerance * 2.5 ||
+                    _lastDistanceOnSegment! < tolerance * 2.5 ||
+                    _lastDistanceOnSegment! > length - tolerance * 2.5;
+    
+    // Use more relaxed gap tolerance at edges
+    double gapMultiplier = nearEdge ? 0.0 : 0.0;
+    double maxAllowedPathDistance = screenDistance * gapMultiplier + tolerance * 5.5;
 
     // If path distance is much larger than screen distance, points aren't adjacent
     if (pathDistance > maxAllowedPathDistance) {
@@ -456,12 +517,16 @@ class DrawController extends ChangeNotifier {
       return;
     }
 
-    // Additional smoothness: allow small jumps for very close points
-    if (screenDistance < tolerance * 0.8 && pathDistance < tolerance * 1.5) {
+    // Additional smoothness at edges: allow small jumps for very close points
+    // More forgiving at edges where precision matters
+    double smoothnessTolerance = nearEdge ? tolerance * 1.2 : tolerance * 0.8;
+    double smoothnessPathDistance = nearEdge ? tolerance * 2.0 : tolerance * 1.5;
+    
+    if (screenDistance < smoothnessTolerance && pathDistance < smoothnessPathDistance) {
       // Very close movement - always fill for smoothness
     }
 
-    // PARTIAL FILLING: Only fill the portion the user actually covers
+    // BIDIRECTIONAL FILLING: Calculate the range to fill
     double rangeStart =
         _lastDistanceOnSegment! < endDistOnActive
             ? _lastDistanceOnSegment!
@@ -470,6 +535,34 @@ class DrawController extends ChangeNotifier {
         _lastDistanceOnSegment! > endDistOnActive
             ? _lastDistanceOnSegment!
             : endDistOnActive;
+
+    // Check if this segment is fully completed (100%)
+    bool isFullyCompleted = _fullyCompletedSegmentIds.contains(_activeSegmentId);
+    
+    // BIDIRECTIONAL BACKWARD DETECTION:
+    // User is moving backward if moving away from initial touch point
+    bool isMovingBackward = false;
+    if (_initialPositionOnSegment != null) {
+      // Calculate distances from initial position
+      double lastDistFromInitial = (_lastDistanceOnSegment! - _initialPositionOnSegment!).abs();
+      double currentDistFromInitial = (endDistOnActive - _initialPositionOnSegment!).abs();
+      
+      // Moving backward = getting closer to initial position (smaller distance)
+      isMovingBackward = currentDistFromInitial < lastDistFromInitial;
+    }
+    
+    // RULE: Remove partial color when moving backward on non-completed segments
+    if (isMovingBackward && !isFullyCompleted) {
+      _removeRangeById(_activeSegmentId!, rangeStart.clamp(0, length), rangeEnd.clamp(0, length));
+      _lastDistanceOnSegment = endDistOnActive;
+      return;
+    }
+    
+    // RULE: If segment is fully completed, don't allow any changes
+    if (isFullyCompleted) {
+      _lastDistanceOnSegment = endDistOnActive;
+      return;
+    }
 
     // Auto-fill the gap between last and current position
     _addRangeById(
@@ -480,9 +573,18 @@ class DrawController extends ChangeNotifier {
 
     _lastDistanceOnSegment = endDistOnActive;
 
+    // Check if segment reached 85% - auto-complete it
+    double fillRatio = _getSegmentFilledRatioById(_activeSegmentId!);
+    if (fillRatio >= 0.85 && !isFullyCompleted) {
+      // RULE: Auto-fill remaining 15% when 85% is covered
+      _autoCompleteSegment(_activeSegmentId!);
+      _fullyCompletedSegmentIds.add(_activeSegmentId!);
+      print('✅ Segment $_activeSegmentId auto-completed at ${(fillRatio * 100).toStringAsFixed(1)}%');
+    }
+
     // Mark segment as significantly filled if > 80% complete
     // Lower threshold allows partial fills without blocking re-entry
-    if (_getSegmentFilledRatioById(_activeSegmentId!) > 0.8) {
+    if (fillRatio > 0.8) {
       _drawnSegmentIds.add(_activeSegmentId!);
     }
   }
@@ -497,10 +599,11 @@ class DrawController extends ChangeNotifier {
     final activeSegment = _graph!.segments[_activeSegmentId];
     if (activeSegment == null) return;
 
-    // Check if we're AT an endpoint (relaxed for smooth transitions)
-    bool nearStart = _lastDistanceOnSegment! < tolerance * 3.0;
+    // Check if we're AT an endpoint (tighter threshold for accuracy)
+    // Reduced from 3.0x to 2.0x for more precise edge detection
+    bool nearStart = _lastDistanceOnSegment! <= tolerance * 2.0;
     bool nearEnd =
-        _lastDistanceOnSegment! > activeSegment.length - tolerance * 3.0;
+        _lastDistanceOnSegment! > activeSegment.length - tolerance * 2.0;
 
     if (!nearStart && !nearEnd) {
       // Not at an endpoint - don't transition
@@ -536,14 +639,14 @@ class DrawController extends ChangeNotifier {
       // Check if the current point is on this segment
       final position = segment.findClosestPosition(
         point,
-        tolerance: tolerance * 4.0,
+        tolerance: tolerance * 3.5, // Slightly reduced for better accuracy
       );
       if (position != null && position.screenDistance < bestDist) {
-        // Check if we're near a connection point
+        // Check if we're near a connection point (tighter check)
         bool nearConnectionStart =
-            position.distanceAlongSegment < tolerance * 4.0;
+            position.distanceAlongSegment < tolerance * 2.5;
         bool nearConnectionEnd =
-            position.distanceAlongSegment > segment.length - tolerance * 4.0;
+            position.distanceAlongSegment > segment.length - tolerance * 2.5;
 
         if (nearConnectionStart || nearConnectionEnd) {
           bestDist = position.screenDistance;
@@ -578,7 +681,7 @@ class DrawController extends ChangeNotifier {
       // Switch to new segment
       _activeSegmentId = bestNewSegmentId;
       _lastDistanceOnSegment = bestPosition.distanceAlongSegment;
-      _drawingForward = null;
+      _initialPositionOnSegment = bestPosition.distanceAlongSegment; // Track new starting point
 
       // Auto-fill from touch point to nearest endpoint
       double distToStart = bestPosition.distanceAlongSegment;
